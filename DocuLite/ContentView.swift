@@ -370,6 +370,10 @@ struct ContentView: View {
             Text(saveStatus)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text("构建时间：\(kBuildTime)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
         }
     }
 

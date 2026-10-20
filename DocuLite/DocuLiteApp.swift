@@ -1,5 +1,7 @@
 import SwiftUI
 
+let kBuildTime: String = "2026-10-20 20:28:45"
+
 @main
 struct DocuLiteApp: App {
     @StateObject private var store = DocumentStore()

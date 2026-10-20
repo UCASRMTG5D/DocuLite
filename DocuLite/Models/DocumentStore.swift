@@ -163,7 +163,6 @@ final class DocumentStore: ObservableObject {
         return "assets/" + filename
     }
 
-    /// 直链模式：不拷贝文件，直接返回原图绝对路径供 <img src> 引用。
     func linkImage(at sourceURL: URL) -> String? {
         guard FileManager.default.isReadableFile(atPath: sourceURL.path) else { return nil }
         return sourceURL.path
