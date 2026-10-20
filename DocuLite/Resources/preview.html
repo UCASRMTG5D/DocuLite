@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocuLite 预览</title>
+<style>
+/* ===== 预览排版（与编辑器同源的阅读样式） ===== */
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: #ffffff;
+}
+body {
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  line-height: 1.8;
+  color: #1d1d1f;
+}
+#content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 32px 64px;
+}
+#content p { margin: 0 0 0.6em; }
+#content h1 { font-size: 26px; line-height: 1.4; margin: 1.1em 0 0.5em; font-weight: 700; }
+#content h2 { font-size: 21px; line-height: 1.4; margin: 1em 0 0.5em; font-weight: 650; }
+#content h3 { font-size: 17px; line-height: 1.45; margin: 0.9em 0 0.4em; font-weight: 600; }
+#content blockquote {
+  margin: 0.8em 0;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid #d2d2d7;
+  color: #515154;
+}
+#content ul, #content ol { margin: 0.5em 0; padding-left: 26px; }
+#content li { margin: 0.15em 0; }
+#content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+#content a { color: #0066cc; }
+#content hr { border: none; border-top: 1px solid #d2d2d7; margin: 1.2em 0; }
+#content table { border-collapse: collapse; margin: 0.8em 0; }
+#content td, #content th { border: 1px solid #d2d2d7; padding: 4px 10px; }
+
+/* ===== 点击放大 lightbox ===== */
+#doculite-lightbox {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.92);
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+#doculite-lightbox.open { display: flex; }
+#doculite-lightbox img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+#doculite-lightbox .close-hint {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 22px;
+  font-family: -apple-system, sans-serif;
+  user-select: none;
+  cursor: pointer;
+}
+::selection { background: rgba(0, 120, 255, 0.25); }
+</style>
+</head>
+<body>
+<div id="content"></div>
+<div id="doculite-lightbox" contenteditable="false">
+  <span class="close-hint">✕</span>
+</div>
+<script>
+/* ===== preview.js ===== */
+(function () {
+  'use strict';
+
+  var content = document.getElementById('content');
+  var lightbox = document.getElementById('doculite-lightbox');
+  var lightboxImg = null;
+
+  function openLightbox(img) {
+    if (lightboxImg && lightboxImg.parentNode === lightbox) {
+      lightbox.removeChild(lightboxImg);
+    }
+    lightboxImg = document.createElement('img');
+    lightboxImg.src = img.src;
+    lightboxImg.alt = img.alt || '';
+    lightbox.insertBefore(lightboxImg, lightbox.firstChild);
+    lightbox.classList.add('open');
+  }
+
+  function closeLightbox() {
+    lightbox.classList.remove('open');
+  }
+
+  content.addEventListener('click', function (e) {
+    var img = e.target;
+    if (img && img.tagName === 'IMG' && content.contains(img)) {
+      openLightbox(img);
+    }
+  });
+
+  lightbox.addEventListener('click', function () {
+    closeLightbox();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && lightbox.classList.contains('open')) {
+      closeLightbox();
+    }
+  });
+
+  window.doculitePreview = {
+    setHTML: function (html) {
+      content.innerHTML = (html && html.length > 0) ? html : '';
+    },
+    getHTML: function () {
+      return content.innerHTML;
+    }
+  };
+})();
+</script>
+</body>
+</html>

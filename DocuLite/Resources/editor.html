@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocuLite 编辑器</title>
+<style>
+/* ===== editor.css ===== */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #ffffff;
+}
+body {
+  display: flex;
+  flex-direction: column;
+}
+#editor {
+  flex: 1;
+  min-height: 100%;
+  padding: 24px 32px 64px;
+  outline: none;
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  line-height: 1.8;
+  color: #1d1d1f;
+  caret-color: #1d1d1f;
+  max-width: 860px;
+  word-wrap: break-word;
+}
+#editor p { margin: 0 0 0.6em; }
+#editor h1 { font-size: 26px; line-height: 1.4; margin: 1.1em 0 0.5em; font-weight: 700; }
+#editor h2 { font-size: 21px; line-height: 1.4; margin: 1em 0 0.5em; font-weight: 650; }
+#editor h3 { font-size: 17px; line-height: 1.45; margin: 0.9em 0 0.4em; font-weight: 600; }
+#editor blockquote {
+  margin: 0.8em 0;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid #d2d2d7;
+  color: #515154;
+}
+#editor ul, #editor ol { margin: 0.5em 0; padding-left: 26px; }
+#editor li { margin: 0.15em 0; }
+#editor img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+#editor a { color: #0066cc; }
+#editor hr { border: none; border-top: 1px solid #d2d2d7; margin: 1.2em 0; }
+#editor table { border-collapse: collapse; margin: 0.8em 0; }
+#editor td, #editor th { border: 1px solid #d2d2d7; padding: 4px 10px; }
+::selection { background: rgba(0, 120, 255, 0.25); }
+</style>
+</head>
+<body>
+<div id="editor" contenteditable="true" spellcheck="true"></div>
+<script>
+/* ===== editor.js ===== */
+(function () {
+  'use strict';
+
+  var editor = document.getElementById('editor');
+  var notify = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.doculiteNotify;
+  var reply = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.doculite;
+
+  function post(obj) {
+    if (notify) { notify.postMessage(obj); }
+  }
+
+  // ---------- 内容变更（400ms 防抖） ----------
+  var contentTimer = null;
+  function contentChanged() {
+    if (contentTimer) clearTimeout(contentTimer);
+    contentTimer = setTimeout(function () {
+      contentTimer = null;
+      post({ event: 'contentChanged' });
+    }, 400);
+  }
+
+  // ---------- 选区状态上报（80ms 防抖） ----------
+  var selTimer = null;
+  function selectionChanged() {
+    if (selTimer) clearTimeout(selTimer);
+    selTimer = setTimeout(function () {
+      selTimer = null;
+      reportSelectionState();
+    }, 80);
+  }
+
+  function reportSelectionState() {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    var range = sel.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer)) return;
+    var formatBlock = 'p';
+    var node = range.commonAncestorContainer;
+    if (node.nodeType === 3) node = node.parentNode;
+    var block = node.closest('h1,h2,h3,blockquote,p,div');
+    if (block && editor.contains(block)) {
+      var tag = block.tagName.toLowerCase();
+      if (tag === 'div') tag = 'p';
+      formatBlock = tag;
+    }
+    post({
+      event: 'selectionState',
+      state: {
+        bold: document.queryCommandState('bold'),
+        italic: document.queryCommandState('italic'),
+        underline: document.queryCommandState('underline'),
+        strikeThrough: document.queryCommandState('strikeThrough'),
+        insertUnorderedList: document.queryCommandState('insertUnorderedList'),
+        insertOrderedList: document.queryCommandState('insertOrderedList'),
+        justifyLeft: document.queryCommandState('justifyLeft'),
+        justifyCenter: document.queryCommandState('justifyCenter'),
+        justifyRight: document.queryCommandState('justifyRight'),
+        justifyFull: document.queryCommandState('justifyFull'),
+        formatBlock: formatBlock
+      }
+    });
+  }
+
+  document.addEventListener('selectionchange', selectionChanged);
+  editor.addEventListener('keyup', selectionChanged);
+  editor.addEventListener('mouseup', selectionChanged);
+  editor.addEventListener('focus', selectionChanged);
+  editor.addEventListener('input', function () { contentChanged(); selectionChanged(); });
+
+  // ---------- 图片导入 ----------
+  function importImage(dataURL, srcCallback) {
+    if (!reply) { return; }
+    reply.postMessage({ action: 'importImage', dataURL: dataURL })
+      .then(function (result) {
+        if (typeof result === 'string' && result.length > 0 && srcCallback) {
+          srcCallback(result);
+        }
+      })
+      .catch(function (err) {
+        console.warn('图片导入失败', err);
+      });
+  }
+
+  function insertImageAtSelection(src) {
+    editor.focus();
+    document.execCommand('insertImage', false, src);
+    contentChanged();
+  }
+
+  // 粘贴图片
+  editor.addEventListener('paste', function (e) {
+    var items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type && items[i].type.indexOf('image/') === 0) {
+        e.preventDefault();
+        var blob = items[i].getAsFile();
+        var reader = new FileReader();
+        reader.onload = function (evt) {
+          importImage(evt.target.result, insertImageAtSelection);
+        };
+        reader.readAsDataURL(blob);
+        return;
+      }
+    }
+  });
+
+  // 拖放图片
+  editor.addEventListener('drop', function (e) {
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    for (var i = 0; i < files.length; i++) {
+      if (files[i].type && files[i].type.indexOf('image/') === 0) {
+        e.preventDefault();
+        (function (file) {
+          var reader = new FileReader();
+          reader.onload = function (evt) {
+            importImage(evt.target.result, insertImageAtSelection);
+          };
+          reader.readAsDataURL(file);
+        })(files[i]);
+        return;
+      }
+    }
+  });
+
+  // ---------- 原生调用 API ----------
+  window.doculiteAPI = {
+    setHTML: function (html) {
+      editor.innerHTML = (html && html.length > 0) ? html : '<p><br></p>';
+    },
+    getHTML: function () {
+      return editor.innerHTML;
+    },
+    exec: function (command, value) {
+      editor.focus();
+      document.execCommand(command, false, value || null);
+      contentChanged();
+      reportSelectionState();
+    },
+    insertImage: function (src) {
+      insertImageAtSelection(src);
+    },
+    focus: function () {
+      editor.focus();
+    }
+  };
+})();
+</script>
+</body>
+</html>
