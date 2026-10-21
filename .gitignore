@@ -1,5 +1,6 @@
 # Xcode
 build/
+build*/
 DerivedData/
 *.xcworkspace
 !default.xcworkspace
@@ -26,3 +27,6 @@ Icon?
 # OpenCode / omo
 .omo/
 .opencode/
+
+# 每次构建自动生成的时间戳文件
+DocuLite/GeneratedBuildInfo.swift

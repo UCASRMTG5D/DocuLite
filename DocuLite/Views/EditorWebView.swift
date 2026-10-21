@@ -33,10 +33,20 @@ final class EditorBridge: ObservableObject {
 
     func getHTML() async throws -> String? {
         guard let webView else { return nil }
-        let result = try await webView.callAsyncJavaScript(
-            "return window.doculiteAPI.getHTML();", in: nil, in: .page
-        )
-        return result as? String
+        // 用 evaluateJavaScript 而非 callAsyncJavaScript：后者会把字符串返回值当 JSON 反序列化，
+        // 使非 JSON 的 HTML 桥接为 nil，导致预览无法刷新。
+        let result: String? = await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript(
+                "window.doculiteAPI.getHTML()", in: nil, in: .page
+            ) { res in
+                if case .success(let value) = res {
+                    continuation.resume(returning: value as? String)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+        return result
     }
 
     /// 将 Swift 字符串编码为 JS 字符串字面量（含引号）。
@@ -73,7 +83,8 @@ struct EditorWebView: NSViewRepresentable {
         config.userContentController.add(context.coordinator, name: "doculite")
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
-        webView.setValue(false, forKey: "drawsBackground")
+        // WKWebView 在 macOS 上默认按 WebKit 策略渲染背景；不要手动设 layer 背景，
+        // 否则会干扰布局导致 HSplitView 里出现黑底、不响应的"黑屏"。页面 CSS 已强制白底。
         bridge.webView = webView
         context.coordinator.loadPage(in: webView, baseURL: documentURL)
         context.coordinator.currentToken = token
@@ -99,8 +110,8 @@ struct EditorWebView: NSViewRepresentable {
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.navigationDelegate = nil
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "doculiteNotify")
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "doculite")
+        // WKWebView 会被 SwiftUI 拆卸/复用，removeScriptMessageHandler 会让 JS 侧 messageHandlers 变空，
+        // 从而 contentChanged 与图片导入静默失效；保留注册更安全（coordinator 由 context 强持有）。
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply {
@@ -117,21 +128,28 @@ struct EditorWebView: NSViewRepresentable {
             self.pendingHTML = parent.htmlToLoad
         }
 
-        func loadPage(in webView: WKWebView, baseURL: URL?) {
-            pageLoaded = false
-            guard let pageURL = Bundle.main.url(forResource: "editor", withExtension: "html"),
-                  let page = try? String(contentsOf: pageURL, encoding: .utf8) else {
-                return
-            }
-            let prepared = LocalPageLoader.injectingBase(page, into: baseURL)
-            do {
-                let tempURL = try LocalPageLoader.writeTempPage(prepared)
-                tempPageURL = tempURL
-                webView.loadFileURL(tempURL, allowingReadAccessTo: LocalPageLoader.fullDiskAccess)
-            } catch {
-                webView.loadHTMLString(prepared, baseURL: baseURL)
-            }
+    func loadPage(in webView: WKWebView, baseURL: URL?) {
+        pageLoaded = false
+        guard let pageURL = Bundle.main.url(forResource: "editor", withExtension: "html"),
+              let page = try? String(contentsOf: pageURL, encoding: .utf8) else {
+            NSLog("DBG editor loadPage: 找不到 editor.html 资源")
+            return
         }
+        let prepared = LocalPageLoader.injectingBase(page, into: baseURL)
+        do {
+            let tempURL = try LocalPageLoader.writeTempPage(prepared)
+            tempPageURL = tempURL
+            // 必须用整盘读 "/"：被加载的页面 tempURL 在 /var/folders 临时目录，
+            // 若 readRoot 设为文档目录则 tempURL 不在其子树内，loadFileURL 会直接失败
+            // （WebView 黑屏、JS 不运行、无法操作）。整盘 "/" 同时覆盖临时页、
+            // assets/ 相对路径（经 <base>）与任意绝对路径图片。
+            webView.loadFileURL(tempURL, allowingReadAccessTo: LocalPageLoader.fullDiskAccess)
+            NSLog("DBG editor loadPage OK url=%@ len=%d", tempURL.absoluteString, page.utf8.count)
+        } catch {
+            NSLog("DBG editor loadPage 写临时文件失败: \(error); 回退 loadHTMLString")
+            webView.loadHTMLString(prepared, baseURL: baseURL)
+        }
+    }
 
         func setHTML(_ html: String, in webView: WKWebView) {
             let literal = EditorBridgeJS.string(html)
@@ -151,6 +169,12 @@ struct EditorWebView: NSViewRepresentable {
             if let html = pendingHTML {
                 pendingHTML = nil
                 setHTML(html, in: webView)
+            }
+            // 诊断：确认页面 JS 桥与编辑区可交互
+            webView.evaluateJavaScript(
+                "(function(){var e=document.getElementById('editor');return JSON.stringify({api:typeof window.doculiteAPI,editable:e?e.isContentEditable:null,ready:document.readyState});})()"
+            ) { r, e in
+                NSLog("DBG editorDidFinish api/editable -> %@ err=%@", String(describing: r), String(describing: e))
             }
         }
 
@@ -184,15 +208,19 @@ struct EditorWebView: NSViewRepresentable {
                 replyHandler(nil, nil)
                 return
             }
-            let handler = parent.importImageHandler
-            Task { @MainActor in
-                do {
-                    let relativePath = try await handler(dataURL)
+        let handler = parent.importImageHandler
+        Task { @MainActor in
+            do {
+                let relativePath = try await handler(dataURL)
+                if let relativePath {
                     replyHandler(relativePath, nil)
-                } catch {
-                    replyHandler(nil, error.localizedDescription)
+                } else {
+                    replyHandler(nil, "图片导入失败：无法解析 dataURL")
                 }
+            } catch {
+                replyHandler(nil, error.localizedDescription)
             }
+        }
         }
     }
 }

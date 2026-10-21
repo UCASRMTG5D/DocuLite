@@ -61,11 +61,30 @@ body {
   'use strict';
 
   var editor = document.getElementById('editor');
-  var notify = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.doculiteNotify;
-  var reply = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.doculite;
+
+  // 背景色兜底：某些 WebKit 版本下 WKWebView(drawsBackground=false) 会把底色画黑，
+  // 用 !important 强制白底，避免编辑区黑屏。
+  document.documentElement.style.setProperty('background', '#ffffff', 'important');
+  document.body.style.setProperty('background', '#ffffff', 'important');
+
+  // WKWebView 的消息处理器（notify/reply）可能在脚本解析时尚未注册，
+  // 或被外部拆包/复用而丢失；因此统一惰性读取，不缓存一次性引用。
+  function getNotify() {
+    try {
+      return window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.doculiteNotify;
+    } catch (e) { return null; }
+  }
+  function getReply() {
+    try {
+      return window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.doculite;
+    } catch (e) { return null; }
+  }
 
   function post(obj) {
-    if (notify) { notify.postMessage(obj); }
+    var n = getNotify();
+    if (n) { n.postMessage(obj); }
   }
 
   // ---------- 内容变更（400ms 防抖） ----------
@@ -127,23 +146,70 @@ body {
   editor.addEventListener('input', function () { contentChanged(); selectionChanged(); });
 
   // ---------- 图片导入 ----------
+  // 注意：paste/drop 直接内联 dataURL 即可，但 WKWebView 对 file:// 资源读受限、
+  // dataURL 体积大；统一让原生侧落盘到文档 assets/ 并回传相对路径。
   function importImage(dataURL, srcCallback) {
-    if (!reply) { return; }
-    reply.postMessage({ action: 'importImage', dataURL: dataURL })
-      .then(function (result) {
-        if (typeof result === 'string' && result.length > 0 && srcCallback) {
-          srcCallback(result);
-        }
-      })
-      .catch(function (err) {
-        console.warn('图片导入失败', err);
-      });
+    // 粘贴/拖拽的图片直接内联 data: URI 显示，绕开 WKWebView 对 file:// 子资源的跨源限制。
+    // 原生侧仅做落盘存档（assets/），其返回值不影响显示效果。
+    var r = getReply();
+    if (r) {
+      r.postMessage({ action: 'importImage', dataURL: dataURL })
+        .then(function () { if (srcCallback) { srcCallback(dataURL); } })
+        .catch(function () { if (srcCallback) { srcCallback(dataURL); } });
+    } else if (srcCallback) {
+      srcCallback(dataURL);
+    }
   }
 
   function insertImageAtSelection(src) {
-    editor.focus();
-    document.execCommand('insertImage', false, src);
+    // execCommand('insertImage') 在 WebKit 中不可靠（焦点丢失时为 no-op），
+    // 改用 DOM API 直接插入 <img>。src 统一经 resolveSrc 规范化：data: 内联直接显示，
+    // 相对/绝对路径在 file:// 临时页里受 WebKit opaque-origin 跨源限制常被拒载裂图，
+    // 因此粘贴/拖拽（data:）可靠，工具栏直插也优先内联；此处不再做"补成绝对 URL"。
+    src = resolveSrc(src);
+    var img = document.createElement('img');
+    img.src = src;
+    img.alt = '';
+    var sel = window.getSelection();
+    var inserted = false;
+    if (sel && sel.rangeCount > 0 && editor.contains(sel.anchorNode)) {
+      var range = sel.getRangeAt(0);
+      range.deleteContents();
+      range.insertNode(img);
+      var after = document.createElement('br');
+      img.after(after);
+      range = document.createRange();
+      range.setStartAfter(after);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      inserted = true;
+    }
+    if (!inserted) {
+      editor.appendChild(document.createElement('p'));
+      var lastP = editor.lastElementChild;
+      if (lastP && lastP.tagName === 'P') {
+        lastP.insertBefore(img, lastP.firstChild);
+      } else {
+        editor.appendChild(img);
+      }
+      var r2 = document.createRange();
+      var after2 = document.createElement('br');
+      img.after(after2);
+      r2.setStartAfter(after2);
+      r2.collapse(true);
+      if (sel) { sel.removeAllRanges(); sel.addRange(r2); }
+    }
     contentChanged();
+  }
+
+  // src 规范化：data:/http(https): 原样；其余（含相对与绝对 file 路径）保持原样。
+  // 不再强行把相对路径补成绝对 URL——那会让 assets/xxx 被 <base>（指向文档包目录）
+  // 解析到"文档包内的 assets"，而 WKWebView 临时页 + 跨源限制下这些 file:// 子资源
+  // 经常拒载裂图。真正的显示保障在原生侧：工具栏/粘贴/拖拽一律内联 data: URI。
+  function resolveSrc(src) {
+    if (typeof src !== 'string' || src === '') return src;
+    return src;
   }
 
   // 粘贴图片
@@ -204,6 +270,17 @@ body {
       editor.focus();
     }
   };
+
+  // ---------- 处理器自恢复：若首帧时 messageHandlers 尚未注册，轮询直至可用并发一次握手 ----------
+  (function retryBind() {
+    var n = getNotify(), r = getReply();
+    if (n && r && !window.__doculiteBridgeReady) {
+      window.__doculiteBridgeReady = true;
+      try { n.postMessage({ event: 'bridgeReady' }); } catch (e) {}
+      return;
+    }
+    setTimeout(retryBind, 120);
+  })();
 })();
 </script>
 </body>

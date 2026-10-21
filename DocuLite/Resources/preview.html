@@ -64,7 +64,38 @@ body {
   object-fit: contain;
   border-radius: 4px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  transition: transform 0.12s ease-out;
 }
+#doculite-lightbox .zoom-bar {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-family: -apple-system, sans-serif;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  user-select: none;
+  backdrop-filter: blur(8px);
+}
+#doculite-lightbox .zoom-bar button {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+#doculite-lightbox .zoom-bar button:hover { background: rgba(255, 255, 255, 0.18); }
+#doculite-lightbox .zoom-pct { min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; }
 #doculite-lightbox .close-hint {
   position: absolute;
   top: 16px;
@@ -82,6 +113,12 @@ body {
 <div id="content"></div>
 <div id="doculite-lightbox" contenteditable="false">
   <span class="close-hint">✕</span>
+  <div class="zoom-bar">
+    <button type="button" id="doculite-zoom-out" title="缩小" aria-label="缩小">−</button>
+    <span class="zoom-pct" id="doculite-zoom-pct">100%</span>
+    <button type="button" id="doculite-zoom-in" title="放大" aria-label="放大">+</button>
+    <button type="button" id="doculite-zoom-reset" title="还原" aria-label="还原">1:1</button>
+  </div>
 </div>
 <script>
 /* ===== preview.js ===== */
@@ -91,6 +128,13 @@ body {
   var content = document.getElementById('content');
   var lightbox = document.getElementById('doculite-lightbox');
   var lightboxImg = null;
+  var zoomInBtn = document.getElementById('doculite-zoom-in');
+  var zoomOutBtn = document.getElementById('doculite-zoom-out');
+  var zoomResetBtn = document.getElementById('doculite-zoom-reset');
+  var zoomPct = document.getElementById('doculite-zoom-pct');
+  var zoom = 1;
+  var minZoom = 0.2;
+  var maxZoom = 8;
 
   function openLightbox(img) {
     if (lightboxImg && lightboxImg.parentNode === lightbox) {
@@ -99,12 +143,33 @@ body {
     lightboxImg = document.createElement('img');
     lightboxImg.src = img.src;
     lightboxImg.alt = img.alt || '';
-    lightbox.insertBefore(lightboxImg, lightbox.firstChild);
+    lightbox.insertBefore(lightboxImg, lightbox.querySelector('.zoom-bar'));
+    zoom = 1;
+    applyZoom();
     lightbox.classList.add('open');
   }
 
   function closeLightbox() {
     lightbox.classList.remove('open');
+    zoom = 1;
+  }
+
+  function applyZoom() {
+    if (lightboxImg) {
+      lightboxImg.style.transform = 'scale(' + zoom + ')';
+    }
+    if (zoomPct) {
+      zoomPct.textContent = Math.round(zoom * 100) + '%';
+    }
+  }
+
+  function setZoom(next) {
+    zoom = Math.min(maxZoom, Math.max(minZoom, next));
+    applyZoom();
+  }
+
+  function zoomBy(factor) {
+    setZoom(zoom * factor);
   }
 
   content.addEventListener('click', function (e) {
@@ -114,13 +179,50 @@ body {
     }
   });
 
-  lightbox.addEventListener('click', function () {
-    closeLightbox();
+  lightbox.addEventListener('click', function (e) {
+    if (e.target === lightbox || e.target === lightboxImg) {
+      closeLightbox();
+    }
   });
 
+  if (zoomInBtn) {
+    zoomInBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      zoomBy(1.25);
+    });
+  }
+  if (zoomOutBtn) {
+    zoomOutBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      zoomBy(0.8);
+    });
+  }
+  if (zoomResetBtn) {
+    zoomResetBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      setZoom(1);
+    });
+  }
+
+  lightbox.addEventListener('wheel', function (e) {
+    if (!lightbox.classList.contains('open')) { return; }
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1.1 : 0.9);
+  }, { passive: false });
+
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && lightbox.classList.contains('open')) {
+    if (!lightbox.classList.contains('open')) { return; }
+    if (e.key === 'Escape') {
       closeLightbox();
+    } else if (e.key === '=' || e.key === '+') {
+      e.preventDefault();
+      zoomBy(1.25);
+    } else if (e.key === '-') {
+      e.preventDefault();
+      zoomBy(0.8);
+    } else if (e.key === '0') {
+      e.preventDefault();
+      setZoom(1);
     }
   });
 

@@ -59,6 +59,7 @@ struct ContentView: View {
 
     @State private var showNewDocAlert = false
     @State private var newDocName = "未命名文档"
+    @State private var isReadingMode = false
     @State private var renameTarget: DocumentStore.DocuLiteDocument?
     @State private var renameText = ""
     @State private var deleteTarget: DocumentStore.DocuLiteDocument?
@@ -81,7 +82,7 @@ struct ContentView: View {
                 selectedDoc = store.documents.first
             }
         }
-        .onChange(of: selectedDoc) { newDoc in
+        .onChange(of: selectedDoc) { _, newDoc in
             guard let doc = newDoc else {
                 editorHTML = ""
                 previewHTML = ""
@@ -93,7 +94,7 @@ struct ContentView: View {
             documentToken = UUID()
             saveStatus = "已保存"
         }
-        .onChange(of: store.documents) { _ in
+        .onChange(of: store.documents) {
             // 工作区变化 / 删除 / 重命名后保持选中有效
             if let current = selectedDoc,
                !store.documents.contains(where: { $0.id == current.id }) {
@@ -188,6 +189,15 @@ struct ContentView: View {
                     .truncationMode(.middle)
                 Spacer()
                 Button {
+                    if store.chooseWorkspace(), let first = store.documents.first {
+                        switchDocument(to: first)
+                    }
+                } label: {
+                    Image(systemName: "folder.badge.gear")
+                }
+                .buttonStyle(.borderless)
+                .help("自定义工作区目录")
+                Button {
                     showNewDocAlert = true
                 } label: {
                     Image(systemName: "plus")
@@ -278,31 +288,40 @@ struct ContentView: View {
     private var editorDetail: some View {
         VStack(spacing: 0) {
             Divider()
-            HSplitView {
-                EditorWebView(
-                    htmlToLoad: editorHTML,
-                    documentURL: selectedDoc?.url,
-                    token: documentToken,
-                    bridge: bridge,
-                    importImageHandler: { dataURL in
-                        guard let doc = selectedDoc else { return nil }
-                        return try store.importImage(dataURL: dataURL, for: doc)
-                    },
-                    onContentChanged: {
-                        saveNow()
-                    },
-                    onSelectionState: { dictionary in
-                        selectionState = EditorSelectionState(dictionary: dictionary)
-                    }
-                )
-                .frame(minWidth: 360)
-
+            if isReadingMode {
+                // 阅读模式：只读、整屏预览，单击图片可放大并 +/- 缩放
                 PreviewWebView(
                     htmlFragment: previewHTML,
                     documentURL: selectedDoc?.url,
                     token: documentToken
                 )
-                .frame(minWidth: 320)
+            } else {
+                HSplitView {
+                    EditorWebView(
+                        htmlToLoad: editorHTML,
+                        documentURL: selectedDoc?.url,
+                        token: documentToken,
+                        bridge: bridge,
+                        importImageHandler: { dataURL in
+                            guard let doc = selectedDoc else { return nil }
+                            return try store.importImage(dataURL: dataURL, for: doc)
+                        },
+                        onContentChanged: {
+                            saveNow()
+                        },
+                        onSelectionState: { dictionary in
+                            selectionState = EditorSelectionState(dictionary: dictionary)
+                        }
+                    )
+                    .frame(minWidth: 360)
+
+                    PreviewWebView(
+                        htmlFragment: previewHTML,
+                        documentURL: selectedDoc?.url,
+                        token: documentToken
+                    )
+                    .frame(minWidth: 320)
+                }
             }
         }
         .toolbar { toolbarContent }
@@ -358,6 +377,14 @@ struct ContentView: View {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
             .help("导出为独立文件夹（文档 + 全部图片拷贝，链接转为相对链接）")
+
+            Button {
+                isReadingMode.toggle()
+            } label: {
+                Label(isReadingMode ? "退出阅读" : "阅读模式",
+                      systemImage: isReadingMode ? "pencil" : "book")
+            }
+            .help(isReadingMode ? "返回编辑" : "只读预览，单击图片放大并可用 +/- 缩放")
 
             Button {
                 saveNow()
@@ -420,7 +447,8 @@ struct ContentView: View {
         }
     }
 
-    /// copyMode=true：图片拷贝进文档 assets/；false：仅记录原图绝对路径（不占空间）。
+    /// 插入图片。显示一律用 data: URI 内联（绕开 WKWebView 对裸 file:// 路径的跨源拒载）；
+    /// 存档（copyMode）额外把图片落盘进文档 assets/，导出时可重写为相对路径。
     private func insertImages(copyMode: Bool) {
         guard let doc = selectedDoc else { return }
         let panel = NSOpenPanel()
@@ -435,33 +463,26 @@ struct ContentView: View {
         panel.title = copyMode ? "插入副本" : "链接原图"
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
-            if copyMode {
-                guard let data = try? Data(contentsOf: url) else { continue }
-                let ext = url.pathExtension.lowercased()
-                let mime: String
-                switch ext {
-                case "jpg", "jpeg": mime = "image/jpeg"
-                case "gif": mime = "image/gif"
-                case "webp": mime = "image/webp"
-                case "heic": mime = "image/heic"
-                case "bmp": mime = "image/bmp"
-                default: mime = "image/png"
-                }
-                let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
-                do {
-                    if let relativePath = try store.importImage(dataURL: dataURL, for: doc) {
-                        bridge.insertImage(relativePath)
-                    }
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-            } else {
-                if let absolutePath = store.linkImage(at: url) {
-                    bridge.insertImage(absolutePath)
-                } else {
-                    errorMessage = "无法读取图片：\(url.lastPathComponent)"
-                }
+            guard let data = try? Data(contentsOf: url) else {
+                errorMessage = "无法读取图片：\(url.lastPathComponent)"
+                continue
             }
+            let ext = url.pathExtension.lowercased()
+            let mime: String
+            switch ext {
+            case "jpg", "jpeg": mime = "image/jpeg"
+            case "gif": mime = "image/gif"
+            case "webp": mime = "image/webp"
+            case "heic": mime = "image/heic"
+            case "bmp": mime = "image/bmp"
+            default: mime = "image/png"
+            }
+            let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
+            if copyMode {
+                // 副本：额外落盘到文档 assets/（存档/导出用），显示仍用内联 dataURL
+                _ = try? store.importImage(dataURL: dataURL, for: doc)
+            }
+            bridge.insertImage(dataURL)
         }
     }
 

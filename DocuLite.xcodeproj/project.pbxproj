@@ -48,9 +48,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = D0C0000000000000000000D2 /* Build configuration list for PBXNativeTarget "DocuLite" */;
 			buildPhases = (
+				D0C0000000000000000000C4 /* Generate Build Info */,
 				D0C0000000000000000000C1 /* Sources */,
 				D0C0000000000000000000C2 /* Frameworks */,
 				D0C0000000000000000000C3 /* Resources */,
+				D0C0000000000000000000C5 /* Install to Applications */,
 			);
 			buildRules = (
 			);
@@ -110,6 +112,41 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		D0C0000000000000000000C4 /* Generate Build Info */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Generate Build Info";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "sh \"${PROJECT_DIR}/DocuLite/Scripts/generate_build_info.sh\" \"${PROJECT_DIR}/DocuLite/GeneratedBuildInfo.swift\"\n";
+		};
+		D0C0000000000000000000C5 /* Install to Applications */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(FULL_PRODUCT_NAME)",
+			);
+			name = "Install to Applications";
+			outputPaths = (
+				"/Applications/$(FULL_PRODUCT_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "sh \"${PROJECT_DIR}/DocuLite/Scripts/install_to_applications.sh\" \"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		D0C0000000000000000000C1 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -131,7 +168,8 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+			 OTHER_CODE_SIGN_FLAGS = ("--deep", "--options", "runtime");
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -162,7 +200,8 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+			 OTHER_CODE_SIGN_FLAGS = ("--deep", "--options", "runtime");
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;

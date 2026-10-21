@@ -14,6 +14,7 @@ struct PreviewWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         webView.navigationDelegate = context.coordinator
+        // 用默认白底，不关背景、不动 layer，避免透明底在深色容器下透出黑屏
         context.coordinator.currentBaseURL = documentURL
         context.coordinator.currentToken = token
         context.coordinator.pendingHTML = htmlFragment
@@ -64,6 +65,8 @@ struct PreviewWebView: NSViewRepresentable {
             do {
                 let tempURL = try LocalPageLoader.writeTempPage(prepared)
                 tempPageURL = tempURL
+                // 与编辑器一致：必须整盘读 "/"，tempURL（/var/folders）不在文档目录子树内，
+                // 否则 loadFileURL 失败导致预览黑屏。
                 webView.loadFileURL(tempURL, allowingReadAccessTo: LocalPageLoader.fullDiskAccess)
             } catch {
                 webView.loadHTMLString(prepared, baseURL: baseURL)

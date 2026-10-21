@@ -163,9 +163,26 @@ final class DocumentStore: ObservableObject {
         return "assets/" + filename
     }
 
+    /// 返回 data: URI（内联图片字节）；WKWebView 临时页对裸 file:// 子资源有跨源限制，
+    /// 内联后编辑区与预览区都能可靠显示。
+    func linkImageDataURI(at sourceURL: URL) -> String? { linkImage(at: sourceURL) }
+
     func linkImage(at sourceURL: URL) -> String? {
-        guard FileManager.default.isReadableFile(atPath: sourceURL.path) else { return nil }
-        return sourceURL.path
+        guard FileManager.default.isReadableFile(atPath: sourceURL.path),
+              let data = try? Data(contentsOf: sourceURL) else { return nil }
+        // 裸 file:// 绝对路径在 WKWebView 临时页里受 opaque-origin 跨源限制常被拒载裂图，
+        // 统一内联为 data: URI 可靠显示。
+        let ext = sourceURL.pathExtension.lowercased()
+        let mime: String
+        switch ext {
+        case "jpg", "jpeg": mime = "image/jpeg"
+        case "gif": mime = "image/gif"
+        case "webp": mime = "image/webp"
+        case "heic": mime = "image/heic"
+        case "bmp": mime = "image/bmp"
+        default: mime = "image/png"
+        }
+        return "data:\(mime);base64,\(data.base64EncodedString())"
     }
 
     /// 导出：生成 "<文档名>/" 文件夹，内含独立可打开的 document.html 与 assets/ 图片拷贝，
@@ -213,24 +230,42 @@ final class DocumentStore: ObservableObject {
         for match in matches.reversed() {
             guard let srcRange = Range(match.range(at: 3), in: html) else { continue }
             let src = String(html[srcRange])
-            guard let sourceURL = resolveImageSource(src, doc: doc),
-                  fm.fileExists(atPath: sourceURL.path) else { continue }
-            var base = sourceURL.deletingPathExtension().lastPathComponent
-            if base.isEmpty { base = UUID().uuidString.lowercased() }
-            let ext = sourceURL.pathExtension.isEmpty ? "png" : sourceURL.pathExtension
-            var candidate = "\(base).\(ext)"
+            var baseName = ""
+            var ext = "png"
+            var payload: Data?
+            var sourceFile: URL?
+
+            if src.hasPrefix("data:") {
+                guard let data = Self.decodeDataURI(src) else { continue }
+                payload = data
+                ext = Self.extensionForMIME(Self.mimeFromDataURI(src))
+                baseName = "img-\(UUID().uuidString.lowercased())"
+            } else {
+                guard let fileURL = Self.resolveImageSource(src, doc: doc),
+                      fm.fileExists(atPath: fileURL.path) else { continue }
+                sourceFile = fileURL
+                baseName = fileURL.deletingPathExtension().lastPathComponent
+                if baseName.isEmpty { baseName = "img-\(UUID().uuidString.lowercased())" }
+                ext = fileURL.pathExtension.isEmpty ? "png" : fileURL.pathExtension
+            }
+
+            var candidate = "\(baseName).\(ext)"
             var n = 2
             while usedNames.contains(candidate) {
-                candidate = "\(base)-\(n).\(ext)"
+                candidate = "\(baseName)-\(n).\(ext)"
                 n += 1
             }
             usedNames.insert(candidate)
             do {
-                try fm.copyItem(at: sourceURL, to: exportAssets.appendingPathComponent(candidate))
+                if let file = sourceFile {
+                    try fm.copyItem(at: file, to: exportAssets.appendingPathComponent(candidate))
+                } else if let data = payload {
+                    try data.write(to: exportAssets.appendingPathComponent(candidate))
+                }
+                mutable.replaceCharacters(in: match.range(at: 3), with: "assets/\(candidate)")
             } catch {
                 continue
             }
-            mutable.replaceCharacters(in: match.range(at: 3), with: "assets/\(candidate)")
         }
         return mutable as String
     }
@@ -246,6 +281,16 @@ final class DocumentStore: ObservableObject {
             return URL(fileURLWithPath: src)
         }
         return nil
+    }
+
+    /// 从 data: URI 解出图片字节；无法解析时返回 nil。
+    private static func decodeDataURI(_ src: String) -> Data? {
+        guard src.hasPrefix("data:"),
+              src.count > 5,
+              let comma = src.firstIndex(of: ","),
+              comma > src.startIndex else { return nil }
+        let b64 = String(src[src.index(after: comma)...])
+        return Data(base64Encoded: b64, options: .ignoreUnknownCharacters)
     }
 
     /// 校验并生成工作区内唯一名称：trim、去非法字符、重名自动加 " 2"/" 3" 后缀。
@@ -266,14 +311,25 @@ final class DocumentStore: ObservableObject {
     }
 
     private static func extensionForMIME(_ mime: String) -> String {
-        switch mime {
-        case "jpeg", "jpg": return "jpg"
-        case "gif": return "gif"
-        case "webp": return "webp"
-        case "heic": return "heic"
-        case "bmp": return "bmp"
+        let token = mime.lowercased()
+        switch token {
+        case "image/jpeg", "jpeg", "jpg": return "jpg"
+        case "image/gif", "gif": return "gif"
+        case "image/webp", "webp": return "webp"
+        case "image/heic", "heic": return "heic"
+        case "image/bmp", "bmp": return "bmp"
         default: return "png"
         }
+    }
+
+    /// 取 data: URI 的 MIME（如 image/png）。
+    private static func mimeFromDataURI(_ src: String) -> String {
+        guard src.hasPrefix("data:"), let comma = src.firstIndex(of: ",") else { return "" }
+        let metaEnd = src.index(src.startIndex, offsetBy: 5)
+        guard comma > metaEnd else { return "" }
+        var mime = String(src[metaEnd..<comma])
+        if let semi = mime.firstIndex(of: ";") { mime = String(mime[..<semi]) }
+        return mime
     }
 
     private static func error(_ message: String) -> NSError {
