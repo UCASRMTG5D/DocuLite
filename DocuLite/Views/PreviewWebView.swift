@@ -30,14 +30,19 @@ struct PreviewWebView: NSViewRepresentable {
             context.coordinator.currentBaseURL = documentURL
             context.coordinator.currentToken = token
             context.coordinator.pendingHTML = htmlFragment
+            context.coordinator.sentHTML = nil
             context.coordinator.loadPage(in: webView, baseURL: documentURL)
         } else if tokenChanged {
             context.coordinator.currentToken = token
             context.coordinator.pendingHTML = htmlFragment
-            context.coordinator.pushHTML(in: webView)
+            if context.coordinator.pageLoaded {
+                context.coordinator.pushHTML(in: webView)
+            }
         } else if context.coordinator.pageLoaded && context.coordinator.sentHTML != htmlFragment {
             context.coordinator.pendingHTML = htmlFragment
             context.coordinator.pushHTML(in: webView)
+        } else if !context.coordinator.pageLoaded {
+            context.coordinator.pendingHTML = htmlFragment
         }
     }
 

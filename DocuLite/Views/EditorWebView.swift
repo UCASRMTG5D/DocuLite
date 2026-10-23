@@ -95,15 +95,18 @@ struct EditorWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         bridge.webView = webView
-        if context.coordinator.currentBaseURL != documentURL {
+        let baseURLChanged = context.coordinator.currentBaseURL != documentURL
+        let tokenChanged = context.coordinator.currentToken != token
+        if baseURLChanged {
             context.coordinator.currentBaseURL = documentURL
             context.coordinator.currentToken = token
             context.coordinator.pendingHTML = htmlToLoad
             context.coordinator.loadPage(in: webView, baseURL: documentURL)
-        } else if context.coordinator.currentToken != token {
+        } else if tokenChanged {
             context.coordinator.currentToken = token
-            if let html = htmlToLoad {
-                context.coordinator.setHTML(html, in: webView)
+            context.coordinator.pendingHTML = htmlToLoad
+            if context.coordinator.pageLoaded {
+                context.coordinator.setHTML(htmlToLoad ?? "", in: webView)
             }
         }
     }
@@ -125,7 +128,7 @@ struct EditorWebView: NSViewRepresentable {
         /// 页面加载完成后待注入的 HTML（load 时暂存）
         var pendingHTML: String?
         var tempPageURL: URL?
-        private var pageLoaded = false
+        var pageLoaded = false
 
         init(_ parent: EditorWebView) {
             self.parent = parent

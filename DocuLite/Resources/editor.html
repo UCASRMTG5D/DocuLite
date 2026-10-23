@@ -153,7 +153,11 @@ body {
   document.addEventListener('selectionchange', selectionChanged);
   editor.addEventListener('focus', selectionChanged);
   editor.addEventListener('input', function () { contentChanged(); selectionChanged(); });
-  editor.addEventListener('compositionstart', function () { composing = true; });
+  editor.addEventListener('compositionstart', function () {
+    composing = true;
+    if (contentTimer) { clearTimeout(contentTimer); contentTimer = null; }
+    if (selTimer) { clearTimeout(selTimer); selTimer = null; }
+  });
   editor.addEventListener('compositionend', function () {
     composing = false;
     contentChanged();
