@@ -8,7 +8,7 @@ extension Notification.Name {
 }
 
 /// 工具栏按钮反映的选区格式状态。
-struct EditorSelectionState {
+struct EditorSelectionState: Equatable {
     var bold = false
     var italic = false
     var underline = false
@@ -107,13 +107,22 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .doculiteSave)) { _ in
             saveNow()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
+            saveNow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            saveNow()
+        }
         .alert("新建文档", isPresented: $showNewDocAlert) {
             TextField("文档名称", text: $newDocName)
             Button("创建") {
-                if let doc = store.createDocument(named: newDocName) {
-                    switchDocument(to: doc)
+                Task { @MainActor in
+                    await saveDocument()
+                    if let doc = store.createDocument(named: newDocName) {
+                        selectedDoc = doc
+                    }
+                    newDocName = "未命名文档"
                 }
-                newDocName = "未命名文档"
             }
             Button("取消", role: .cancel) {}
         }
@@ -124,16 +133,21 @@ struct ContentView: View {
             TextField("新名称", text: $renameText)
             Button("重命名") {
                 guard let target = renameTarget else { return }
-                do {
-                    try store.renameDocument(target, to: renameText)
+                Task { @MainActor in
                     if selectedDoc?.id == target.id {
-                        selectedDoc = store.documents.first(where: { $0.name == renameText.trimmingCharacters(in: .whitespaces) })
-                            ?? store.documents.first
+                        await saveDocument()
                     }
-                } catch {
-                    errorMessage = error.localizedDescription
+                    do {
+                        try store.renameDocument(target, to: renameText)
+                        if selectedDoc?.id == target.id {
+                            selectedDoc = store.documents.first(where: { $0.name == renameText.trimmingCharacters(in: .whitespaces) })
+                                ?? store.documents.first
+                        }
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                    renameTarget = nil
                 }
-                renameTarget = nil
             }
             Button("取消", role: .cancel) { renameTarget = nil }
         }
@@ -189,8 +203,11 @@ struct ContentView: View {
                     .truncationMode(.middle)
                 Spacer()
                 Button {
-                    if store.chooseWorkspace(), let first = store.documents.first {
-                        switchDocument(to: first)
+                    Task { @MainActor in
+                        await saveDocument()
+                        if store.chooseWorkspace(), let first = store.documents.first {
+                            selectedDoc = first
+                        }
                     }
                 } label: {
                     Image(systemName: "folder.badge.gear")
@@ -220,7 +237,7 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(store.documents, selection: $selectedDoc) { doc in
+                List(store.documents, selection: documentSelectionBinding) { doc in
                     Label(doc.name, systemImage: "doc.text")
                         .lineLimit(1)
                         .tag(doc)
@@ -310,7 +327,10 @@ struct ContentView: View {
                             saveNow()
                         },
                         onSelectionState: { dictionary in
-                            selectionState = EditorSelectionState(dictionary: dictionary)
+                            let next = EditorSelectionState(dictionary: dictionary)
+                            if next != selectionState {
+                                selectionState = next
+                            }
                         }
                     )
                     .frame(minWidth: 360)
@@ -365,7 +385,7 @@ struct ContentView: View {
             }
 
             Button {
-                insertImages(copyMode: false)
+                insertImages()
             } label: {
                 Label("插入图片", systemImage: "photo")
             }
@@ -429,27 +449,48 @@ struct ContentView: View {
 
     // MARK: - 动作
 
-    /// 切换文档：统一交给 onChange(of: selectedDoc) 加载。
-    private func switchDocument(to doc: DocumentStore.DocuLiteDocument) {
-        selectedDoc = doc
+    /// 点击侧栏切换文档前，先把当前文档的最新内容取回并落盘，
+    /// 避免“切换后读回旧文件再覆盖”导致最后几个字丢失。
+    private var documentSelectionBinding: Binding<DocumentStore.DocuLiteDocument?> {
+        Binding(
+            get: { selectedDoc },
+            set: { newValue in
+                guard newValue?.id != selectedDoc?.id else { return }
+                Task { @MainActor in
+                    await saveDocument()
+                    selectedDoc = newValue
+                }
+            }
+        )
     }
 
-    /// 从编辑器取回最新 HTML 并保存，同步推送预览。
+    /// 从编辑器取回最新 HTML 并保存，等落盘完成后返回。
     private func saveNow() {
+        Task { @MainActor in
+            await saveDocument()
+        }
+    }
+
+    @MainActor
+    private func saveDocument() async {
         guard let doc = selectedDoc else { return }
         saveStatus = "保存中…"
-        Task { @MainActor in
-            let html = (try? await bridge.getHTML()) ?? editorHTML
-            editorHTML = html
-            store.saveHTML(html, for: doc)
+        let html = (try? await bridge.getHTML()) ?? editorHTML
+        guard selectedDoc?.id == doc.id else { return }
+        editorHTML = html
+        store.saveHTML(html, for: doc)
+        if previewHTML != html {
             previewHTML = html
+        }
+        await DocumentStore.flushPendingWrites()
+        if selectedDoc?.id == doc.id {
             saveStatus = "已保存"
         }
     }
 
-    /// 插入图片。显示一律用 data: URI 内联（绕开 WKWebView 对裸 file:// 路径的跨源拒载）；
-    /// 存档（copyMode）额外把图片落盘进文档 assets/，导出时可重写为相对路径。
-    private func insertImages(copyMode: Bool) {
+    /// 插入图片：复制到文档 assets/（源文件只读、不改动），HTML 只写相对路径，
+    /// 文档保持可移植且保存时无需搬运 base64。
+    private func insertImages() {
         guard let doc = selectedDoc else { return }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
@@ -460,29 +501,15 @@ struct ContentView: View {
             imageTypes.append(webp)
         }
         panel.allowedContentTypes = imageTypes
-        panel.title = copyMode ? "插入副本" : "链接原图"
+        panel.title = "插入图片（复制到文档）"
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
-            guard let data = try? Data(contentsOf: url) else {
-                errorMessage = "无法读取图片：\(url.lastPathComponent)"
-                continue
+            do {
+                let relativePath = try store.importImage(fileURL: url, for: doc)
+                bridge.insertImage(relativePath)
+            } catch {
+                errorMessage = error.localizedDescription
             }
-            let ext = url.pathExtension.lowercased()
-            let mime: String
-            switch ext {
-            case "jpg", "jpeg": mime = "image/jpeg"
-            case "gif": mime = "image/gif"
-            case "webp": mime = "image/webp"
-            case "heic": mime = "image/heic"
-            case "bmp": mime = "image/bmp"
-            default: mime = "image/png"
-            }
-            let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
-            if copyMode {
-                // 副本：额外落盘到文档 assets/（存档/导出用），显示仍用内联 dataURL
-                _ = try? store.importImage(dataURL: dataURL, for: doc)
-            }
-            bridge.insertImage(dataURL)
         }
     }
 

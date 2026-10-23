@@ -41,6 +41,13 @@ struct PreviewWebView: NSViewRepresentable {
         }
     }
 
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        if let temp = coordinator.tempPageURL {
+            coordinator.tempPageURL = nil
+            try? FileManager.default.removeItem(at: temp)
+        }
+    }
+
     final class Coordinator: NSObject, WKNavigationDelegate {
         var parent: PreviewWebView
         var currentBaseURL: URL?
@@ -62,12 +69,14 @@ struct PreviewWebView: NSViewRepresentable {
                 return
             }
             let prepared = LocalPageLoader.injectingBase(page, into: baseURL)
+            if let old = tempPageURL {
+                tempPageURL = nil
+                try? FileManager.default.removeItem(at: old)
+            }
             do {
-                let tempURL = try LocalPageLoader.writeTempPage(prepared)
-                tempPageURL = tempURL
-                // 与编辑器一致：必须整盘读 "/"，tempURL（/var/folders）不在文档目录子树内，
-                // 否则 loadFileURL 失败导致预览黑屏。
-                webView.loadFileURL(tempURL, allowingReadAccessTo: LocalPageLoader.fullDiskAccess)
+                let temp = try LocalPageLoader.writeTempPage(prepared, preferredDirectory: baseURL)
+                tempPageURL = temp.url
+                webView.loadFileURL(temp.url, allowingReadAccessTo: temp.readRoot)
             } catch {
                 webView.loadHTMLString(prepared, baseURL: baseURL)
             }
@@ -85,10 +94,6 @@ struct PreviewWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             pageLoaded = true
-            if let temp = tempPageURL {
-                tempPageURL = nil
-                try? FileManager.default.removeItem(at: temp)
-            }
             pushHTML(in: webView)
         }
     }

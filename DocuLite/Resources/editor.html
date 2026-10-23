@@ -87,24 +87,35 @@ body {
     if (n) { n.postMessage(obj); }
   }
 
-  // ---------- 内容变更（400ms 防抖） ----------
+  // ---------- 内容变更（600ms 防抖；组合输入期间不保存） ----------
   var contentTimer = null;
+  var composing = false;
+  var lastContentPostAt = Date.now();
   function contentChanged() {
-    if (contentTimer) clearTimeout(contentTimer);
+    if (composing) { return; }
+    if (contentTimer) { clearTimeout(contentTimer); }
+    var delay = (Date.now() - lastContentPostAt > 5000) ? 0 : 600;
+    if (delay === 0) {
+      lastContentPostAt = Date.now();
+      post({ event: 'contentChanged' });
+      return;
+    }
     contentTimer = setTimeout(function () {
       contentTimer = null;
+      lastContentPostAt = Date.now();
       post({ event: 'contentChanged' });
-    }, 400);
+    }, delay);
   }
 
-  // ---------- 选区状态上报（80ms 防抖） ----------
+  // ---------- 选区状态上报（180ms 防抖） ----------
   var selTimer = null;
   function selectionChanged() {
-    if (selTimer) clearTimeout(selTimer);
+    if (composing) { return; }
+    if (selTimer) { clearTimeout(selTimer); }
     selTimer = setTimeout(function () {
       selTimer = null;
-      reportSelectionState();
-    }, 80);
+      if (!composing) { reportSelectionState(); }
+    }, 180);
   }
 
   function reportSelectionState() {
@@ -140,21 +151,26 @@ body {
   }
 
   document.addEventListener('selectionchange', selectionChanged);
-  editor.addEventListener('keyup', selectionChanged);
-  editor.addEventListener('mouseup', selectionChanged);
   editor.addEventListener('focus', selectionChanged);
   editor.addEventListener('input', function () { contentChanged(); selectionChanged(); });
+  editor.addEventListener('compositionstart', function () { composing = true; });
+  editor.addEventListener('compositionend', function () {
+    composing = false;
+    contentChanged();
+    selectionChanged();
+  });
 
   // ---------- 图片导入 ----------
-  // 注意：paste/drop 直接内联 dataURL 即可，但 WKWebView 对 file:// 资源读受限、
-  // dataURL 体积大；统一让原生侧落盘到文档 assets/ 并回传相对路径。
+  // 原生侧把图片写入文档 assets/ 并返回相对路径；失败时退回 data: URI 保证仍可显示。
   function importImage(dataURL, srcCallback) {
-    // 粘贴/拖拽的图片直接内联 data: URI 显示，绕开 WKWebView 对 file:// 子资源的跨源限制。
-    // 原生侧仅做落盘存档（assets/），其返回值不影响显示效果。
     var r = getReply();
     if (r) {
       r.postMessage({ action: 'importImage', dataURL: dataURL })
-        .then(function () { if (srcCallback) { srcCallback(dataURL); } })
+        .then(function (path) {
+          if (srcCallback) {
+            srcCallback((typeof path === 'string' && path.length > 0) ? path : dataURL);
+          }
+        })
         .catch(function () { if (srcCallback) { srcCallback(dataURL); } });
     } else if (srcCallback) {
       srcCallback(dataURL);

@@ -110,6 +110,10 @@ struct EditorWebView: NSViewRepresentable {
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         webView.navigationDelegate = nil
+        if let temp = coordinator.tempPageURL {
+            coordinator.tempPageURL = nil
+            try? FileManager.default.removeItem(at: temp)
+        }
         // WKWebView 会被 SwiftUI 拆卸/复用，removeScriptMessageHandler 会让 JS 侧 messageHandlers 变空，
         // 从而 contentChanged 与图片导入静默失效；保留注册更安全（coordinator 由 context 强持有）。
     }
@@ -136,15 +140,15 @@ struct EditorWebView: NSViewRepresentable {
             return
         }
         let prepared = LocalPageLoader.injectingBase(page, into: baseURL)
+        if let old = tempPageURL {
+            tempPageURL = nil
+            try? FileManager.default.removeItem(at: old)
+        }
         do {
-            let tempURL = try LocalPageLoader.writeTempPage(prepared)
-            tempPageURL = tempURL
-            // 必须用整盘读 "/"：被加载的页面 tempURL 在 /var/folders 临时目录，
-            // 若 readRoot 设为文档目录则 tempURL 不在其子树内，loadFileURL 会直接失败
-            // （WebView 黑屏、JS 不运行、无法操作）。整盘 "/" 同时覆盖临时页、
-            // assets/ 相对路径（经 <base>）与任意绝对路径图片。
-            webView.loadFileURL(tempURL, allowingReadAccessTo: LocalPageLoader.fullDiskAccess)
-            NSLog("DBG editor loadPage OK url=%@ len=%d", tempURL.absoluteString, page.utf8.count)
+            let temp = try LocalPageLoader.writeTempPage(prepared, preferredDirectory: baseURL)
+            tempPageURL = temp.url
+            webView.loadFileURL(temp.url, allowingReadAccessTo: temp.readRoot)
+            NSLog("DBG editor loadPage OK url=%@ root=%@ len=%d", temp.url.absoluteString, temp.readRoot.path, page.utf8.count)
         } catch {
             NSLog("DBG editor loadPage 写临时文件失败: \(error); 回退 loadHTMLString")
             webView.loadHTMLString(prepared, baseURL: baseURL)
@@ -162,10 +166,6 @@ struct EditorWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             pageLoaded = true
-            if let temp = tempPageURL {
-                tempPageURL = nil
-                try? FileManager.default.removeItem(at: temp)
-            }
             if let html = pendingHTML {
                 pendingHTML = nil
                 setHTML(html, in: webView)
@@ -234,16 +234,29 @@ enum EditorBridgeJS {
     }
 }
 
-/// 将打包 HTML 写成临时文件并以整盘读权限加载，
-/// 使编辑器/预览既能读文档包内的 assets/ 相对路径，也能显示直链的绝对路径图片。
+/// 将打包 HTML 写成临时文件并以文档目录为读根加载，
+/// 使编辑器/预览能读取文档包内的 assets/ 相对路径。
 enum LocalPageLoader {
     static let fullDiskAccess = URL(fileURLWithPath: "/", isDirectory: true)
 
-    static func writeTempPage(_ content: String) throws -> URL {
+    struct TempPage {
+        let url: URL
+        let readRoot: URL
+    }
+
+    static func writeTempPage(_ content: String, preferredDirectory: URL?) throws -> TempPage {
+        if let directory = preferredDirectory {
+            // 页面必须与 assets/ 同属一个读根，否则 WKWebView 的 WebContent
+            // 进程会拒绝加载相对路径图片（naturalWidth 为 0）。
+            let url = directory.appendingPathComponent(".doculite-page-\(UUID().uuidString).html")
+            if (try? Data(content.utf8).write(to: url, options: .atomic)) != nil {
+                return TempPage(url: url, readRoot: directory)
+            }
+        }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("doculite-\(UUID().uuidString).html")
         try Data(content.utf8).write(to: url, options: .atomic)
-        return url
+        return TempPage(url: url, readRoot: fullDiskAccess)
     }
 
     static func injectingBase(_ page: String, into baseURL: URL?) -> String {

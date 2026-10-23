@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import AppKit
+import CryptoKit
 
 /// 文档仓库：管理工作区文件夹与 .doculite 目录包文档（document.html + assets/）。
 @MainActor
@@ -15,6 +16,7 @@ final class DocumentStore: ObservableObject {
     }
 
     private static let workspaceDefaultsKey = "doculite.workspacePath"
+    private static let saveQueue = DispatchQueue(label: "app.doculite.save", qos: .userInitiated)
 
     init() {
         restoreWorkspaceIfNeeded()
@@ -118,14 +120,143 @@ final class DocumentStore: ObservableObject {
 
     func loadHTML(for doc: DocuLiteDocument) -> String? {
         let fileURL = doc.url.appendingPathComponent("document.html")
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        return String(data: data, encoding: .utf8)
+        Self.removeStaleTempPages(in: doc.url)
+        guard let data = try? Data(contentsOf: fileURL),
+              let html = String(data: data, encoding: .utf8) else { return nil }
+        // 旧版本把图片以 base64 内联在 HTML 里（单张图可达数 MB），导致每次保存
+        // 都要序列化、跨进程传输、写盘并重建整个预览。首次打开时安全迁移到
+        // assets/：先备份、逐张校验字节一致后才替换文件；任何一步失败都保留原文件。
+        if let migrated = Self.migrateInlineImages(in: html, doc: doc) {
+            return migrated
+        }
+        return html
+    }
+
+    private static func removeStaleTempPages(in docURL: URL) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: docURL,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+        let cutoff = Date().addingTimeInterval(-3600)
+        for item in items where item.lastPathComponent.hasPrefix(".doculite-page-") {
+            let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if modified < cutoff {
+                try? fm.removeItem(at: item)
+            }
+        }
     }
 
     func saveHTML(_ html: String, for doc: DocuLiteDocument) {
         let fileURL = doc.url.appendingPathComponent("document.html")
-        // 原子写 + 失败不破坏旧文件
-        try? Data(html.utf8).write(to: fileURL, options: .atomic)
+        let data = Data(html.utf8)
+        // 后台串行写：同一文档的多次保存按调用顺序落盘，且不阻塞输入事件。
+        Self.saveQueue.async {
+            do {
+                // 原子写 + 失败不破坏旧文件
+                try data.write(to: fileURL, options: .atomic)
+            } catch {
+                NSLog("DBG saveHTML failed: \(error)")
+            }
+        }
+    }
+
+    /// 等待当前已排队的磁盘写入全部完成。切换文档前调用，避免立刻读回旧文件。
+    static func flushPendingWrites() async {
+        await withCheckedContinuation { continuation in
+            saveQueue.async { continuation.resume() }
+        }
+    }
+
+    /// 把 `<img src="data:image/...;base64,...">` 抽取为 assets/ 下的实体文件。
+    /// 返回迁移后的 HTML；没有可迁移内容或任何一步失败时返回 nil（调用方继续用原 HTML）。
+    static func migrateInlineImages(in html: String, doc: DocuLiteDocument) -> String? {
+        guard html.contains("data:image/") else { return nil }
+        let pattern = "(<img\\b[^>]*?\\ssrc\\s*=\\s*)([\"'])(data:image/([A-Za-z0-9.+-]+);base64,([^\"']*))\\2"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = html as NSString
+        let matches = regex.matches(in: html, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return nil }
+
+        let fm = FileManager.default
+        let assetsDir = doc.url.appendingPathComponent("assets", isDirectory: true)
+        do {
+            try fm.createDirectory(at: assetsDir, withIntermediateDirectories: true)
+        } catch {
+            NSLog("DBG migrate assets dir failed: \(error)")
+            return nil
+        }
+
+        var replacements: [(range: NSRange, value: String)] = []
+        for match in matches {
+            let dataRange = match.range(at: 3)
+            let subtypeRange = match.range(at: 4)
+            let base64Range = match.range(at: 5)
+            guard dataRange.location != NSNotFound,
+                  subtypeRange.location != NSNotFound,
+                  base64Range.location != NSNotFound else { return nil }
+
+            let mime = "image/" + ns.substring(with: subtypeRange).lowercased()
+            let base64 = ns.substring(with: base64Range)
+            guard let bytes = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
+                  !bytes.isEmpty else {
+                NSLog("DBG migrate decode failed mime=%@", mime)
+                return nil
+            }
+
+            let ext = Self.extensionForMIME(mime)
+            let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            let baseName = "img-\(digest.prefix(16))"
+            var filename = "\(baseName).\(ext)"
+            var target = assetsDir.appendingPathComponent(filename)
+            var suffix = 2
+            while fm.fileExists(atPath: target.path) {
+                if (try? Data(contentsOf: target)) == bytes { break }
+                filename = "\(baseName)-\(suffix).\(ext)"
+                target = assetsDir.appendingPathComponent(filename)
+                suffix += 1
+            }
+            if !fm.fileExists(atPath: target.path) {
+                do {
+                    try bytes.write(to: target, options: .atomic)
+                    guard (try? Data(contentsOf: target)) == bytes else {
+                        try? fm.removeItem(at: target)
+                        NSLog("DBG migrate verify failed: %@", filename)
+                        return nil
+                    }
+                } catch {
+                    NSLog("DBG migrate write failed: \(error)")
+                    return nil
+                }
+            }
+            replacements.append((dataRange, "assets/\(filename)"))
+        }
+
+        let rewritten = NSMutableString(string: html)
+        for replacement in replacements.sorted(by: { $0.range.location > $1.range.location }) {
+            rewritten.replaceCharacters(in: replacement.range, with: replacement.value)
+        }
+        let migrated = rewritten as String
+        guard migrated != html else { return nil }
+
+        let fileURL = doc.url.appendingPathComponent("document.html")
+        let backupURL = doc.url.appendingPathComponent("document.html.bak")
+        if !fm.fileExists(atPath: backupURL.path) {
+            do {
+                try fm.copyItem(at: fileURL, to: backupURL)
+            } catch {
+                NSLog("DBG migrate backup failed: \(error)")
+                return nil
+            }
+        }
+        do {
+            try Data(migrated.utf8).write(to: fileURL, options: .atomic)
+        } catch {
+            NSLog("DBG migrate write html failed: \(error)")
+            return nil
+        }
+        NSLog("DBG migrated %d inline image(s), html %d -> %d chars", replacements.count, html.count, migrated.count)
+        return migrated
     }
 
     func assetBaseURL(for doc: DocuLiteDocument) -> URL {
@@ -163,26 +294,21 @@ final class DocumentStore: ObservableObject {
         return "assets/" + filename
     }
 
-    /// 返回 data: URI（内联图片字节）；WKWebView 临时页对裸 file:// 子资源有跨源限制，
-    /// 内联后编辑区与预览区都能可靠显示。
-    func linkImageDataURI(at sourceURL: URL) -> String? { linkImage(at: sourceURL) }
-
-    func linkImage(at sourceURL: URL) -> String? {
-        guard FileManager.default.isReadableFile(atPath: sourceURL.path),
-              let data = try? Data(contentsOf: sourceURL) else { return nil }
-        // 裸 file:// 绝对路径在 WKWebView 临时页里受 opaque-origin 跨源限制常被拒载裂图，
-        // 统一内联为 data: URI 可靠显示。
-        let ext = sourceURL.pathExtension.lowercased()
-        let mime: String
-        switch ext {
-        case "jpg", "jpeg": mime = "image/jpeg"
-        case "gif": mime = "image/gif"
-        case "webp": mime = "image/webp"
-        case "heic": mime = "image/heic"
-        case "bmp": mime = "image/bmp"
-        default: mime = "image/png"
+    func importImage(fileURL: URL, for doc: DocuLiteDocument) throws -> String {
+        let ext = fileURL.pathExtension.lowercased()
+        let resolvedExt = ext.isEmpty ? "png" : ext
+        let filename = UUID().uuidString.lowercased() + "." + resolvedExt
+        let assetsDir = assetBaseURL(for: doc)
+        let destination = assetsDir.appendingPathComponent(filename)
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: assetsDir.path) {
+            try fm.createDirectory(at: assetsDir, withIntermediateDirectories: true)
         }
-        return "data:\(mime);base64,\(data.base64EncodedString())"
+        guard !fm.fileExists(atPath: destination.path) else {
+            throw Self.error("图片文件已存在，请重试")
+        }
+        try fm.copyItem(at: fileURL, to: destination)
+        return "assets/" + filename
     }
 
     /// 导出：生成 "<文档名>/" 文件夹，内含独立可打开的 document.html 与 assets/ 图片拷贝，
@@ -318,6 +444,7 @@ final class DocumentStore: ObservableObject {
         case "image/webp", "webp": return "webp"
         case "image/heic", "heic": return "heic"
         case "image/bmp", "bmp": return "bmp"
+        case "image/svg+xml", "svg": return "svg"
         default: return "png"
         }
     }
